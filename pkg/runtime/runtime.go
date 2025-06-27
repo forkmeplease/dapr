@@ -39,6 +39,9 @@ import (
 
 	nr "github.com/dapr/components-contrib/nameresolution"
 	"github.com/dapr/components-contrib/state"
+	"github.com/dapr/kit/concurrency"
+	"github.com/dapr/kit/logger"
+
 	"github.com/dapr/dapr/pkg/actors"
 	"github.com/dapr/dapr/pkg/actors/hostconfig"
 	"github.com/dapr/dapr/pkg/api/grpc"
@@ -83,8 +86,6 @@ import (
 	"github.com/dapr/dapr/pkg/runtime/wfengine"
 	"github.com/dapr/dapr/pkg/security"
 	"github.com/dapr/dapr/utils"
-	"github.com/dapr/kit/concurrency"
-	"github.com/dapr/kit/logger"
 )
 
 var log = logger.NewLogger("dapr.runtime")
@@ -239,6 +240,7 @@ func newDaprRuntime(ctx context.Context,
 		CompStore:          compStore,
 		StateTTLEnabled:    globalConfig.IsFeatureEnabled(config.ActorStateTTL),
 		MaxRequestBodySize: runtimeConfig.maxRequestBodySize,
+		Mode:               runtimeConfig.mode,
 	})
 
 	processor := processor.New(processor.Options{
@@ -334,8 +336,8 @@ func newDaprRuntime(ctx context.Context,
 			Actors:             actors,
 			Addresses:          runtimeConfig.schedulerAddress,
 			Security:           sec,
-			Healthz:            runtimeConfig.healthz,
 			WFEngine:           wfe,
+			Healthz:            runtimeConfig.healthz,
 			SchedulerReminders: globalConfig.IsFeatureEnabled(config.SchedulerReminders),
 		}),
 		initComplete:   make(chan struct{}),
@@ -352,7 +354,7 @@ func newDaprRuntime(ctx context.Context,
 		gracePeriod = &duration
 	}
 
-	rtHealthz := rt.runtimeConfig.healthz.AddTarget()
+	rtHealthz := rt.runtimeConfig.healthz.AddTarget("runtime")
 	rt.runnerCloser = concurrency.NewRunnerCloserManager(log, gracePeriod,
 		rt.runtimeConfig.metricsExporter.Start,
 		rt.processor.Process,
@@ -693,7 +695,7 @@ func (a *DaprRuntime) initRuntime(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize actors: %w", err)
 	}
 
-	a.runtimeConfig.outboundHealthz.AddTarget().Ready()
+	a.runtimeConfig.outboundHealthz.AddTarget("app").Ready()
 	if err := a.blockUntilAppIsReady(ctx); err != nil {
 		return err
 	}
@@ -809,7 +811,7 @@ func (a *DaprRuntime) appHealthChanged(ctx context.Context, status *apphealth.St
 			log.Warnf("Failed to register hosted actors: %s", err)
 		}
 
-		a.jobsManager.StartApp(ctx)
+		a.jobsManager.StartApp()
 	} else {
 		select {
 		case <-a.isAppHealthy:
@@ -817,7 +819,7 @@ func (a *DaprRuntime) appHealthChanged(ctx context.Context, status *apphealth.St
 			close(a.isAppHealthy)
 		}
 
-		a.jobsManager.StopApp(ctx)
+		a.jobsManager.StopApp()
 
 		// Stop topic subscriptions and input bindings
 		a.processor.Subscriber().StopAppSubscriptions()
@@ -1071,10 +1073,11 @@ func (a *DaprRuntime) initActors(ctx context.Context) error {
 	}
 
 	if err := a.actors.Init(actors.InitOptions{
-		Hostname:        hostAddress,
-		StateStoreName:  actorStateStoreName,
-		GRPC:            a.grpc,
-		SchedulerClient: a.jobsManager.Client(),
+		Hostname:          hostAddress,
+		StateStoreName:    actorStateStoreName,
+		GRPC:              a.grpc,
+		SchedulerClient:   a.jobsManager.Client(),
+		SchedulerReloader: a.jobsManager,
 	}); err != nil {
 		return err
 	}
